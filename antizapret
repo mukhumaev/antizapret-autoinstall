@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+
+# Подразумевается что все конмады выполняются от имени root пользователя из диреткории /root
+
+# проверка зависимостей
+function check-depends(){
+
+    local QUIET DEPENDS_LIST DEPENDS_NOT_FOUND
+
+    [ "$1" = "-q" ] && QUIET=true && shift
+
+    [ -z "$1" ] && echo "в ${FUNCNAME} не передан параметр" && return 1
+
+    DEPENDS_LIST="$*"
+    DEPENDS_NOT_FOUND=""
+
+    for i in ${DEPENDS_LIST}; do
+        [[ $(which "$i" 2>/dev/null) ]] || DEPENDS_NOT_FOUND="${DEPENDS_NOT_FOUND} $i"
+    done
+
+    [ -z "${DEPENDS_NOT_FOUND}" ] && return 0
+
+    [ "${QUIET}" = "true" ] && return 1
+    echo -e "ОШИБКА!!! Не найдены след. зависимости:\n${DEPENDS_NOT_FOUND}" && return 1
+}
+
+function check-os(){
+
+    local SUPPORTED_VERSION_ID SUPPORTED_ID TIMEOUT
+
+    SUPPORTED_ID="Ubuntu"
+    SUPPORTED_VERSION_ID="20.04"
+    TIMEOUT=5
+
+    if ! apt --help > /dev/null 2>&1; then
+       echo "Скрипт работает только на базе deb дистрибутивов"
+       exit 1
+    fi
+
+    if ! grep ^ID /etc/os-release | grep -q -i "${SUPPORTED_ID}" || \
+       ! grep ^VERSION_ID /etc/os-release | grep -q -i "${SUPPORTED_VERSION_ID}"; then
+        echo "Работа скрипта проверялась на ${SUPPORTED_ID} ${SUPPORTED_VERSION_ID}. Работа на вашей ОС не гарантирована"
+        echo "Скрипт продолжит работу через ${TIMEOUT} сек..."
+        sleep ${TIMEOUT}
+    fi
+}
+
+# установка зависимостей
+function install-depends(){
+    echo "Установка обновлений и зависимостей"
+    apt update > /dev/null 2>&1
+    apt upgrade -y > /dev/null 2>&1
+    apt install -y gpg curl systemd-container nginx zram-config util-linux jq openssl htop telnet nmap > /dev/null 2>&1
+
+    # install docker
+    check-depends curl || return 1
+    if ! check-depends -q docker; then
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sh /tmp/get-docker.sh
+    fi
+}
+
+function zram-enable(){
+    check-depends zramctl || return 1
+
+    echo "Проверка и включение zram"
+    systemctl enable zram-config
+    systemctl start zram-config
+}
+
+function pihole-docker(){
+
+    check-depends docker || return 1
+
+    local TIMEOUT=10
+
+    echo -e '\n\n'
+    # заменяем DNS в системе на значение перменной DNS_SERVER
+    sed -ie "s/nameserver .*/nameserver ${DNS_SERVER_FOR_HOST}/g" /etc/resolv.conf
+
+    # отключаем локальный резолвер
+    # чтобы pihole мог поднять свой сервер на 53 порту
+    systemctl stop systemd-resolved > /dev/null 2>&1
+    systemctl status systemd-resolved > /dev/null 2>&1
+    systemctl disable systemd-resolved > /dev/null 2>&1
+
+    pihole-dns-server > /dev/null 2>&1
+
+    case $1 in
+    run|up)
+        if docker ps -a | grep -q pihole-docker ; then
+            echo "ВНИМАНИЕ!!! Контейнер pihole-docker уже имеется и будет пересоздан с новым паролем в течении ${TIMEOUT} сек..."
+            sleep ${TIMEOUT}
+        fi
+
+        docker rm -f pihole-docker > /dev/null 2>&1
+
+        docker run -d \
+                   --restart always \
+                   --name pihole-docker \
+                   -h pihole-docker \
+                   -p "$(pihole-dns-server):53:53/udp" \
+                   -p "127.0.0.1:3000:80/tcp" \
+                   -v "${PIHOLE_ETC_DATA_FOLDER}/pihole:/etc/pihole:z" \
+                   -v "${PIHOLE_ETC_DATA_FOLDER}/dnsmasq.d:/etc/dnsmasq.d:z" \
+                   -e TZ="Europe/Moscow" \
+                   -e FTLCONF_REPLY_ADDR4="$(myip domain)" \
+                   -e PIHOLE_DNS_="8.8.8.8;8.8.4.4;1.1.1.1;1.0.0.1" \
+                   -e WEBPASSWORD="${PIHOLE_WEBPASSWORD}" \
+                   pihole/pihole > /dev/null 2>&1 && \
+                   return 0 || return 1
+    ;;
+
+    update)
+        echo "Обновление контейнера"
+        if docker ps -a | grep -q pihole-docker; then
+            echo "ВНИМАНИЕ!!! Контейнер pihole-docker уже имеется и будет обновлен через ${TIMEOUT} сек..."
+            sleep ${TIMEOUT}
+        else
+            echo "Не найден контейнер для обновления. Новый контейнер будет создан через ${TIMEOUT} сек..."
+            sleep ${TIMEOUT}
+            pihole-docker up
+            return $?
+        fi
+
+        docker rm -f pihole-docker > /dev/null 2>&1
+        docker run -d \
+                   --restart always \
+                   --name pihole-docker \
+                   -h pihole-docker \
+                   -p "$(pihole-dns-server):53:53/udp" \
+                   -p "127.0.0.1:3000:80/tcp" \
+                   -v "${PIHOLE_ETC_DATA_FOLDER}/pihole:/etc/pihole:z" \
+                   -v "${PIHOLE_ETC_DATA_FOLDER}/dnsmasq.d:/etc/dnsmasq.d:z" \
+                   pihole/pihole > /dev/null 2>&1 && \
+                   echo "Контейнер pihole-docker обновлен" && \
+                   return 0 || return 1
+    ;;
+
+    *)
+        echo "Доступные команды:"
+        echo "  up      -  поднять новый конфиг"
+        echo "  update  -  обновить текущую конфигурацию"
+    ;;
+    esac
+}
+
+function pihole-dns-server(){
+    sleep 5
+    if ip a | grep -q antizapr; then
+        ip -o addr | \
+        grep anti | \
+        grep link | \
+        grep -E -o "([0-9]{1,3}\.){3}[0-9]{1,3}" | \
+        head -n1
+    fi
+}
+
+function run-command-inside-container(){
+  [ -z "${CONTAINER_NAME}" ] && echo "Не задано имя контейнера в CONTAINER_NAME" && return 1
+
+  if machinectl list | grep -q "${CONTAINER_NAME}"; then
+      nsenter \
+        --target="$(machinectl show --property Leader "${CONTAINER_NAME}" | sed "s/^Leader=//")" \
+        --mount --uts --ipc --net --pid $@
+  else
+      echo "Контейнер ${CONTAINER_NAME} не найден"
+  fi
+}
+
+function create-antizapret-container(){
+
+    check-depends "gpg machinectl" || return 1
+
+    [ -z "${CONTAINER_NAME}" ] && echo "Не задано имя контейнера в CONTAINER_NAME" && return 1
+
+    function install-container(){
+        if ! machinectl list | grep -q "${CONTAINER_NAME}"; then
+            echo "Установка контейнера antizapret"
+
+            mkdir -p /root/.gnupg
+            gpg --no-default-keyring --keyring /etc/systemd/import-pubring.gpg --keyserver hkps://keyserver.ubuntu.com --receive-keys 0xEF2E2223D08B38D4B51FFB9E7135A006B28E1285
+
+            machinectl pull-tar https://antizapret.prostovpn.org/container-images/az-vpn/rootfs.tar.xz "${CONTAINER_NAME}"
+            mkdir -p /etc/systemd/nspawn/
+            echo -e "[Network]\nVirtualEthernet=yes\nPort=tcp:1194:1194\nPort=udp:1194:1194" > "/etc/systemd/nspawn/${CONTAINER_NAME}.nspawn"
+
+            systemctl enable --now systemd-networkd.service
+            systemctl restart systemd-networkd.service
+            machinectl enable "${CONTAINER_NAME}"
+            machinectl start "${CONTAINER_NAME}"
+            sleep 10
+        fi
+    }
+
+    function container-dns-set(){
+
+        local CONTAINER_RESOLVER_FILE TEMP_RESOLVER_FILE DNS_SERVER
+
+        DNS_SERVER="$1"
+
+        if [ -z "${DNS_SERVER}" ]; then
+            echo "Не передан адрес DNS сервера. Попытка автоматического определения"
+            DNS_SERVER="$(pihole-dns-server)"
+        fi
+        
+        [ -z "${DNS_SERVER}" ] && echo "Не удалось определить DNS сервер автоматически" && return 1
+
+        echo "Указание pihole DNS в antizapret"
+
+        # файл настройки резолвера контейнера
+        CONTAINER_RESOLVER_FILE="/etc/knot-resolver/kresd.conf"
+        # место копирования файла на хосте
+        TEMP_RESOLVER_FILE="/tmp/$(basename "${CONTAINER_RESOLVER_FILE}")"
+
+        # удаляем старый файл если он остался
+        rm -rf "${TEMP_RESOLVER_FILE}"
+
+        # копируем конфиг с контейнера на хост
+        machinectl copy-from "${CONTAINER_NAME}" "${CONTAINER_RESOLVER_FILE}" "${TEMP_RESOLVER_FILE}"
+
+        # добавление DNS pi-hole в контейнер antizapret
+        if ! tail -n 8 "${TEMP_RESOLVER_FILE}" | grep -q "${DNS_SERVER}"; then
+            # добавляем правило для knot-resolver
+            # которое позволяет использовать свой DNS сервер
+            echo "policy.add(policy.all(policy.FORWARD({'${DNS_SERVER}'})))" >> "${TEMP_RESOLVER_FILE}"
+            # удаляем старый конфиг
+            run-command-inside-container rm -rf "${CONTAINER_RESOLVER_FILE}"
+            # копируем измененный конфиг с хоста в контейнер
+            machinectl copy-to "${CONTAINER_NAME}" "${TEMP_RESOLVER_FILE}" "${CONTAINER_RESOLVER_FILE}"
+        fi
+    }
+
+    function container-script-set(){
+        local CONTAINER_MAIN_SCRIPT CONTAINER_LIST_UPDATER_SCRIPT TEMP_MAIN_SCRIPT TEMP_LIST_UPDATER_SCRIPT CUSTOM_HOSTS_LIST
+
+        CUSTOM_HOSTS_LIST="$1"
+        [ -z "${CUSTOM_HOSTS_LIST}" ] && echo "Не передана ссылка на список хостов" && return 1
+
+        echo "Генерация скрипта автозагрузки хостов по кастомному листу"
+
+        CONTAINER_MAIN_SCRIPT="/root/antizapret/doall.sh"
+        TEMP_MAIN_SCRIPT="/tmp/$(basename "${CONTAINER_MAIN_SCRIPT}")"
+        CONTAINER_LIST_UPDATER_SCRIPT="/root/antizapret/custom-list-update.sh"
+        TEMP_LIST_UPDATER_SCRIPT="/tmp/$(basename "${CONTAINER_LIST_UPDATER_SCRIPT}")"
+
+        # создание временного файла с содержимым
+        echo "curl -f --fail-early --compressed -o config/include-hosts-custom.txt '${CUSTOM_HOSTS_LIST}' || exit 1" > "${TEMP_LIST_UPDATER_SCRIPT}"
+        
+        # удаление имеющегося скрипта
+        run-command-inside-container rm -rf "${CONTAINER_LIST_UPDATER_SCRIPT}"
+
+        # скопировать временный  скрипт в кониейнер
+        machinectl copy-to "${CONTAINER_NAME}" "${TEMP_LIST_UPDATER_SCRIPT}" "${CONTAINER_LIST_UPDATER_SCRIPT}"
+
+        # разрешить выполнение скрипта в контейнере
+        run-command-inside-container chmod +x "${CONTAINER_LIST_UPDATER_SCRIPT}"
+
+        # удаляем старый файл если он остался
+        rm -rf "${TEMP_MAIN_SCRIPT}"
+
+        # копируем скрипт с контейнера на хост
+        machinectl copy-from "${CONTAINER_NAME}" "${CONTAINER_MAIN_SCRIPT}" "${TEMP_MAIN_SCRIPT}"
+
+        # добавление нашего скрипта в контейнер antizapret
+        if ! grep -q "$(basename "${CONTAINER_LIST_UPDATER_SCRIPT}")" "${TEMP_MAIN_SCRIPT}"; then
+            # добавляем наш скрипт в общий список на исполнение
+            run-command-inside-container "grep -B100 cd ${CONTAINER_MAIN_SCRIPT}" > "${TEMP_MAIN_SCRIPT}"
+            echo -e "\n./$(basename ${CONTAINER_LIST_UPDATER_SCRIPT})" >> "${TEMP_MAIN_SCRIPT}"
+            run-command-inside-container "grep -A100 update ${CONTAINER_MAIN_SCRIPT}" >> "${TEMP_MAIN_SCRIPT}"
+
+            # удаляем старый скрипт в контейнере
+            run-command-inside-container rm -rf "${CONTAINER_MAIN_SCRIPT}"
+            # копируем измененный скрипт с хоста в контейнер
+            machinectl copy-to "${CONTAINER_NAME}" "${TEMP_MAIN_SCRIPT}" "${CONTAINER_MAIN_SCRIPT}"
+            # разрешить выполнение скрипта в контейнере
+            run-command-inside-container chmod +x "${CONTAINER_MAIN_SCRIPT}"
+        fi
+    }
+
+    # установка контейнера
+    install-container
+
+    # указание кастомного DNS
+    container-dns-set "$(pihole-dns-server)"
+
+    # скрипт на выгрузку доменов из кастомного источника 
+    container-script-set "${PERSONAL_LIST}"
+}
+
+function export-vpn-config(){
+    echo "Экспорт конфига VPN"
+    sleep 20
+    rm -rf "${VPN_CONFIG_FILE}"
+    machinectl copy-from "${CONTAINER_NAME}" /root/easy-rsa-ipsec/CLIENT_KEY/antizapret-client-tcp.ovpn "${VPN_CONFIG_FILE}" --force
+}
+
+function nginx-settings(){
+    check-depends "nginx openssl" || return 1
+
+    function create-self-signed-cert(){
+        local CERT_FOLDER="/etc/nginx/certs"
+
+        # првоерка наличия сертифкатов
+        [ -d "${CERT_FOLDER}" ] && [ -f "${CERT_FOLDER}/devcert.key" ] && [ -f "${CERT_FOLDER}/devcert.crt" ] && return 0
+        
+        mkdir -p "${CERT_FOLDER}" 
+        yes '' | openssl genrsa -out "devcert.key" 2048
+        yes '' | openssl req -new -key "devcert.key" -out "devcert.csr"
+        yes '' | openssl x509 -req -days 365 -in "devcert.csr" -signkey "devcert.key" -out "devcert.crt"
+        mv ./devcert* "${CERT_FOLDER}/"
+    }
+
+    function setup-nginx-config(){
+        cat > /etc/nginx/sites-available/default << EOF
+server {
+	listen 80;
+  listen 443 ssl;
+
+	server_name _;
+
+	ssl_certificate     /etc/nginx/certs/devcert.crt;
+	ssl_certificate_key /etc/nginx/certs/devcert.key;
+
+	location / {
+		# pihole-docker
+		proxy_pass http://localhost:3000;
+	}
+}
+EOF
+    }
+
+    create-self-signed-cert
+    setup-nginx-config
+    service nginx restart 
+}
+
+function myip(){
+    check-depends "curl dig" || return 1
+    
+    local IP DOMAIN
+    IP="$(curl -s 2ip.ru)"
+    DOMAIN="$(dig -x "${IP}" +short)"
+    
+    if [ $# -eq 0 ] || [ -z "${DOMAIN}" ]; then
+        echo "${IP}"
+    else
+        echo "${DOMAIN::-1}"
+    fi
+}
+
+function main(){
+    
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "Скрипт нужно запускать от root пользователя" && return 1
+    fi
+
+    # проверка совместимости с ОС
+    check-os
+
+    # директория хранения данных pihole
+    PIHOLE_ETC_DATA_FOLDER="/root/docker-pihole-etc"
+
+    # пароль от pi-hole
+    PIHOLE_WEBPASSWORD="$(LC_ALL=C tr -dc A-Za-z0-9 < /dev/urandom | head -c 32)"
+
+    # DNS который будет использоваться на хосте
+    DNS_SERVER_FOR_HOST="1.1.1.1"
+
+    # конфиг файл VPN
+    VPN_CONFIG_FILE="/tmp/antizapret-client-tcp.ovpn"
+
+    # имя контейнера
+    CONTAINER_NAME="antizapret-vpn"
+
+    PERSONAL_LIST="https://raw.githubusercontent.com/mukhumaev/antizapret_custom_list/main/personal"
+
+    case $1 in
+
+    install)
+        install-depends
+        zram-enable
+        create-antizapret-container
+        pihole-docker up
+        nginx-settings
+        export-vpn-config
+
+        if [ -f "${VPN_CONFIG_FILE}" ]; then
+            VPN_CONFIG_FILE="Конфиг-файл VPN: ${VPN_CONFIG_FILE}"
+        else
+            VPN_CONFIG_FILE="Для генерации конфиг-файла VPN перезагрузите сервер и выполните команду: \nmachinectl copy-from ${CONTAINER_NAME} /root/easy-rsa-ipsec/CLIENT_KEY/antizapret-client-tcp.ovpn ${VPN_CONFIG_FILE} --force"
+        fi
+
+        cat << EOF
+
+-------------------------------------------------------
+
+DNS на хосте: ${DNS_SERVER_FOR_HOST}
+DNS сервер от pihole: $(pihole-dns-server)
+
+Docker контейнер pihole: pihole-docker
+Доступ в pihole
+  url: https://$(myip domain)
+  password: ${PIHOLE_WEBPASSWORD}
+
+Antizapret контейнер systemd: ${CONTAINER_NAME}
+Ссылка на доп. список хостов: ${PERSONAL_LIST} 
+$(echo -e "${VPN_CONFIG_FILE}")
+
+EOF
+    ;;
+
+    update)
+        install-depends
+        zram-enable
+        pihole-docker update
+        nginx-settings
+    ;;
+
+    *)
+        echo "Доступные команды:"
+        echo "  install -  установка с нуля"
+        echo "  update  -  обновить текущую конфигурацию"
+    ;;
+
+    esac
+}
+
+main "$*"
