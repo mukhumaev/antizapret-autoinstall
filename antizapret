@@ -314,18 +314,23 @@ function nginx-settings(){
     function setup-nginx-config(){
         cat > /etc/nginx/sites-available/default << EOF
 server {
-	listen 80;
-  listen 443 ssl;
+        listen 80 default_server;
+        server_name _;
+        return 301 https://\$host\$request_uri;
+}
 
-	server_name _;
+server {
+        listen 443 ssl;
 
-	ssl_certificate     /etc/nginx/certs/devcert.crt;
-	ssl_certificate_key /etc/nginx/certs/devcert.key;
+        server_name _;
 
-	location / {
-		# pihole-docker
-		proxy_pass http://localhost:3000;
-	}
+        ssl_certificate     /etc/nginx/certs/devcert.crt;
+        ssl_certificate_key /etc/nginx/certs/devcert.key;
+
+        location / {
+                # pihole-docker
+                proxy_pass http://localhost:3000;
+        }
 }
 EOF
     }
