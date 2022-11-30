@@ -385,9 +385,9 @@ function main(){
     install)
         install-depends
         zram-enable
-        create-antizapret-container
-        pihole-docker up
-        nginx-settings
+        create-antizapret-container || exit 1
+        pihole-docker up || exit 1
+        nginx-settings || exit 1
         export-vpn-config
 
         if [ -f "${VPN_CONFIG_FILE}" ]; then
