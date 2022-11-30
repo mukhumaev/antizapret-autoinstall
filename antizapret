@@ -344,7 +344,7 @@ function myip(){
     check-depends "curl dig" || return 1
     
     local IP DOMAIN
-    IP="$(curl -s 2ip.ru)"
+    IP="$(curl -s ifconfig.me)"
     DOMAIN="$(dig -x "${IP}" +short)"
     
     if [ $# -eq 0 ] || [ -z "${DOMAIN}" ]; then
