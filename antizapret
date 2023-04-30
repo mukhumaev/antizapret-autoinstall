@@ -106,6 +106,7 @@ function pihole-docker(){
                    -v "${PIHOLE_ETC_DATA_FOLDER}/dnsmasq.d:/etc/dnsmasq.d:z" \
                    -e TZ="Europe/Moscow" \
                    -e FTLCONF_REPLY_ADDR4="$(myip domain)" \
+                   -e CORS_HOSTS="$(myip domain)" \
                    -e PIHOLE_DNS_="8.8.8.8;8.8.4.4;1.1.1.1;1.0.0.1" \
                    -e WEBPASSWORD="${PIHOLE_WEBPASSWORD}" \
                    pihole/pihole > /dev/null 2>&1 && \
@@ -338,16 +339,16 @@ EOF
 
     create-self-signed-cert
     setup-nginx-config
-    service nginx restart 
+    service nginx restart
 }
 
 function myip(){
     check-depends "curl dig" || return 1
-    
+
     local IP DOMAIN
     IP="$(curl -s ifconfig.me)"
     DOMAIN="$(dig -x "${IP}" +short)"
-    
+
     if [ $# -eq 0 ] || [ -z "${DOMAIN}" ]; then
         echo "${IP}"
     else
@@ -356,7 +357,7 @@ function myip(){
 }
 
 function main(){
-    
+
     if [ "$(id -u)" -ne 0 ]; then
         echo "Скрипт нужно запускать от root пользователя" && return 1
     fi
