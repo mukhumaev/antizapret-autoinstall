@@ -378,6 +378,7 @@ function main(){
     # имя контейнера
     CONTAINER_NAME="antizapret-vpn"
 
+    # спискок персональных хостов которые нужно перенаправить через VPN
     PERSONAL_LIST="https://raw.githubusercontent.com/mukhumaev/antizapret_custom_list/main/personal"
 
     case $1 in
@@ -405,7 +406,7 @@ DNS сервер от pihole: $(pihole-dns-server)
 
 Docker контейнер pihole: pihole-docker
 Доступ в pihole
-  url: https://$(myip domain)
+  url: https://$(myip domain)/admin/login.php
   password: ${PIHOLE_WEBPASSWORD}
 
 Antizapret контейнер systemd: ${CONTAINER_NAME}
