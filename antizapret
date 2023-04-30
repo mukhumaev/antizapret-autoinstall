@@ -50,7 +50,7 @@ function install-depends(){
     echo "Установка обновлений и зависимостей"
     apt update > /dev/null 2>&1
     apt upgrade -y > /dev/null 2>&1
-    apt install -y gpg curl systemd-container nginx zram-config util-linux jq openssl htop telnet nmap > /dev/null 2>&1
+    apt install -y gpg curl systemd-container nginx util-linux jq openssl htop telnet nmap > /dev/null 2>&1
 
     # install docker
     check-depends curl || return 1
@@ -61,6 +61,7 @@ function install-depends(){
 }
 
 function zram-enable(){
+    apt install zram-config -y > /dev/null 2>&1
     check-depends zramctl || return 1
 
     echo "Проверка и включение zram"
